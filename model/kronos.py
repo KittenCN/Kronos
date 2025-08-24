@@ -345,44 +345,38 @@ def top_k_top_p_filtering(
     From: https://gist.github.com/thomwolf/1a5a29f6962089e871b94cbd09daf317
     """
     if top_k > 0:
-        top_k = min(max(top_k, min_tokens_to_keep), logits.size(-1))  # Safety check
-        # Remove all tokens with a probability less than the last token of the top-k
-        indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
-        logits[indices_to_remove] = filter_value
-        return logits
+        top_k = min(max(top_k, min_tokens_to_keep), logits.size(-1))
+        # 只保留 top_k
+        kth = torch.topk(logits, top_k)[0][..., -1, None]
+        indices_to_remove = logits < kth
+        logits = logits.masked_fill(indices_to_remove, filter_value)
 
     if top_p < 1.0:
         sorted_logits, sorted_indices = torch.sort(logits, descending=True)
         cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-
-        # Remove tokens with cumulative probability above the threshold (token with 0 are kept)
         sorted_indices_to_remove = cumulative_probs > top_p
         if min_tokens_to_keep > 1:
-            # Keep at least min_tokens_to_keep (set to min_tokens_to_keep-1 because we add the first one below)
             sorted_indices_to_remove[..., :min_tokens_to_keep] = 0
-        # Shift the indices to the right to keep also the first token above the threshold
+        # 右移一位，保留第一个超过阈值的 token
         sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
         sorted_indices_to_remove[..., 0] = 0
-
-        # scatter sorted tensors to original indexing
         indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
-        logits[indices_to_remove] = filter_value
-        return logits
+        logits = logits.masked_fill(indices_to_remove, filter_value)
+
+    return logits
 
 
-def sample_from_logits(logits, temperature=1.0, top_k=None, top_p=None, sample_logits=True):
-    logits = logits / temperature
-    if top_k is not None or top_p is not None:
-        if top_k > 0 or top_p < 1.0:
-            logits = top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p)
-
+def sample_from_logits(logits, temperature: float = 1.0,
+                       top_k: int | None = None, top_p: float | None = None,
+                       sample_logits: bool = True):
+    logits = logits / max(temperature, 1e-8)
+    if (top_k and top_k > 0) or (top_p and top_p < 1.0):
+        logits = top_k_top_p_filtering(logits, top_k=top_k or 0, top_p=top_p or 1.0)
     probs = F.softmax(logits, dim=-1)
-
     if not sample_logits:
-        _, x = top_k(probs, k=1, dim=-1)
+        x = torch.topk(probs, k=1, dim=-1)[1]
     else:
         x = torch.multinomial(probs, num_samples=1)
-
     return x
 
 
